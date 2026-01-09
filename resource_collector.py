@@ -32,14 +32,17 @@ class ResourceMetrics:
 class ResourceCollector:
     """
     Collects system resource metrics periodically and stores them in memory.
+    Optionally saves to database for persistent storage.
     """
     
-    def __init__(self, collection_interval: float = 1.0):
+    def __init__(self, collection_interval: float = 1.0, enable_database_storage: bool = False, db_path: str = "resource_monitor.db"):
         """
         Initialize the resource collector.
         
         Args:
             collection_interval: Time in seconds between each collection (default: 1.0)
+            enable_database_storage: If True, automatically save metrics to database
+            db_path: Path to database file (only used if enable_database_storage is True)
         """
         self.collection_interval = collection_interval
         self.metrics_history: List[ResourceMetrics] = []
@@ -56,6 +59,16 @@ class ResourceCollector:
         self.last_disk_read = 0.0
         self.last_disk_write = 0.0
         self.last_disk_time = time.time()
+        
+        # Database storage (optional)
+        self.enable_database_storage = enable_database_storage
+        self.db_storage = None
+        if enable_database_storage:
+            from data_storage import ResourceDataStorage
+            self.db_storage = ResourceDataStorage(db_path)
+            # Batch save settings - save to DB every N metrics to avoid blocking
+            self.db_batch_size = 10
+            self.db_batch_buffer: List[ResourceMetrics] = []
     
     def _get_cpu_usage(self) -> float:
         """Get current CPU usage percentage."""
@@ -229,6 +242,20 @@ class ResourceCollector:
             
             with self.lock:
                 self.metrics_history.append(metrics)
+                
+                # Save to database if enabled (batch mode for efficiency)
+                if self.enable_database_storage and self.db_storage:
+                    self.db_batch_buffer.append(metrics)
+                    if len(self.db_batch_buffer) >= self.db_batch_size:
+                        # Save batch without blocking collection
+                        batch_to_save = self.db_batch_buffer.copy()
+                        self.db_batch_buffer.clear()
+                        # Save in background to avoid blocking
+                        threading.Thread(
+                            target=self.db_storage.save_metrics_batch,
+                            args=(batch_to_save,),
+                            daemon=True
+                        ).start()
             
             time.sleep(self.collection_interval)
     
@@ -246,6 +273,32 @@ class ResourceCollector:
         self.is_collecting = False
         if self.collection_thread:
             self.collection_thread.join(timeout=2.0)
+        
+        # Save any remaining buffered metrics to database
+        if self.enable_database_storage and self.db_storage and self.db_batch_buffer:
+            self.db_storage.save_metrics_batch(self.db_batch_buffer)
+            self.db_batch_buffer.clear()
+    
+    def save_current_history_to_database(self, db_path: str = "resource_monitor.db") -> int:
+        """
+        Save current in-memory history to database.
+        Useful for one-time saves or when database storage wasn't enabled initially.
+        
+        Args:
+            db_path: Path to database file
+            
+        Returns:
+            Number of records saved
+        """
+        from data_storage import ResourceDataStorage
+        storage = ResourceDataStorage(db_path)
+        
+        with self.lock:
+            metrics_to_save = self.metrics_history.copy()
+        
+        if metrics_to_save:
+            return storage.save_metrics_batch(metrics_to_save)
+        return 0
     
     def get_latest_metrics(self) -> Optional[ResourceMetrics]:
         """Get the most recent collected metrics."""

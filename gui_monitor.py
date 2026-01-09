@@ -363,9 +363,13 @@ class ResourceMonitorGUI:
 
 
 def main():
-    """Main entry point for Phase 2 GUI application."""
-    # Create resource collector
-    collector = ResourceCollector(collection_interval=1.0)
+    """Main entry point for Phase 2 GUI application with Phase 3 database storage."""
+    # Create resource collector with database storage enabled
+    collector = ResourceCollector(
+        collection_interval=1.0,
+        enable_database_storage=True,  # Enable automatic database storage
+        db_path="resource_monitor.db"
+    )
     
     # Start collecting
     collector.start_collection()
