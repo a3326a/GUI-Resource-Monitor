@@ -51,6 +51,11 @@ class ResourceCollector:
         self.last_network_sent = 0.0
         self.last_network_recv = 0.0
         self.last_network_time = time.time()
+        
+        # Disk I/O counters for rate calculation
+        self.last_disk_read = 0.0
+        self.last_disk_write = 0.0
+        self.last_disk_time = time.time()
     
     def _get_cpu_usage(self) -> float:
         """Get current CPU usage percentage."""
@@ -70,18 +75,96 @@ class ResourceCollector:
     
     def _get_disk_usage(self) -> tuple[float, float, float]:
         """
-        Get current disk usage for the main partition.
+        Get current disk usage - I/O activity percentage (like Task Manager).
         Returns: (percentage, used_gb, total_gb)
+        Note: percentage is I/O activity, not space usage
         """
         import os
-        # Get the root directory (works on both Windows and Unix)
-        root_path = os.path.abspath(os.sep)
+        import platform
+        
+        # Get disk I/O counters
+        try:
+            disk_io = psutil.disk_io_counters()
+            if disk_io is None:
+                # Fallback to space usage if I/O counters not available
+                return self._get_disk_space_usage()
+            
+            current_time = time.time()
+            time_diff = current_time - self.last_disk_time
+            
+            if time_diff > 0:
+                # Calculate I/O rates in MB/s
+                read_rate = (disk_io.read_bytes - self.last_disk_read) / (1024 * 1024) / time_diff
+                write_rate = (disk_io.write_bytes - self.last_disk_write) / (1024 * 1024) / time_diff
+                
+                # Total I/O rate
+                total_io_rate = read_rate + write_rate
+                
+                # Normalize to percentage (assuming max 100 MB/s = 100%)
+                # This is a reasonable assumption for most modern drives
+                # You can adjust this value based on your drive's capabilities
+                max_io_rate = 100.0  # MB/s
+                io_percent = min(100.0, (total_io_rate / max_io_rate) * 100.0)
+                
+                # Update last values
+                self.last_disk_read = disk_io.read_bytes
+                self.last_disk_write = disk_io.write_bytes
+                self.last_disk_time = current_time
+            else:
+                io_percent = 0.0
+                # Initialize counters on first call
+                self.last_disk_read = disk_io.read_bytes
+                self.last_disk_write = disk_io.write_bytes
+                self.last_disk_time = current_time
+            
+            # Also get disk space for display purposes
+            space_used_gb, space_total_gb = self._get_disk_space_info()
+            
+            return (io_percent, space_used_gb, space_total_gb)
+            
+        except (AttributeError, OSError):
+            # Fallback to space usage if I/O counters fail
+            return self._get_disk_space_usage()
+    
+    def _get_disk_space_info(self) -> tuple[float, float]:
+        """Get disk space information (used and total in GB)."""
+        import os
+        import platform
+        
+        # Get the correct disk path based on OS
+        if platform.system() == 'Windows':
+            partitions = psutil.disk_partitions()
+            main_disk = None
+            max_size = 0
+            
+            for partition in partitions:
+                try:
+                    if 'cdrom' in partition.opts or 'network' in partition.opts:
+                        continue
+                    usage = psutil.disk_usage(partition.mountpoint)
+                    if usage.total > max_size:
+                        max_size = usage.total
+                        main_disk = partition.mountpoint
+                except (PermissionError, OSError):
+                    continue
+            
+            if main_disk is None:
+                main_disk = 'C:\\'
+            root_path = main_disk
+        else:
+            root_path = '/'
+        
         disk = psutil.disk_usage(root_path)
         return (
-            disk.percent,
             disk.used / (1024 * 1024 * 1024),  # Convert to GB
             disk.total / (1024 * 1024 * 1024)  # Convert to GB
         )
+    
+    def _get_disk_space_usage(self) -> tuple[float, float, float]:
+        """Fallback method to get disk space usage percentage."""
+        used_gb, total_gb = self._get_disk_space_info()
+        percent = (used_gb / total_gb * 100) if total_gb > 0 else 0.0
+        return (percent, used_gb, total_gb)
     
     def _get_network_usage(self) -> tuple[float, float, float, float]:
         """
