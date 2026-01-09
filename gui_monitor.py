@@ -1,17 +1,21 @@
 """
-Phase 2: GUI Design and Real-Time Display
-Creates a GUI to display live resource usage with graphs and statistics.
+Phase 2 & 4: GUI Design and Real-Time Display + Historical Data Visualization
+Creates a GUI to display live resource usage with graphs and statistics,
+and allows viewing historical data from the database.
 """
 
 import tkinter as tk
 from tkinter import ttk
+from tkinter import messagebox
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.animation import FuncAnimation
 import matplotlib.pyplot as plt
+from matplotlib.dates import DateFormatter
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 from resource_collector import ResourceCollector, ResourceMetrics
+from data_storage import ResourceDataStorage
 
 
 class ResourceMonitorGUI:
@@ -19,7 +23,7 @@ class ResourceMonitorGUI:
     GUI application for real-time resource monitoring with live graphs.
     """
     
-    def __init__(self, root: tk.Tk, collector: ResourceCollector, update_interval: int = 1000):
+    def __init__(self, root: tk.Tk, collector: ResourceCollector, update_interval: int = 1000, db_path: str = "resource_monitor.db"):
         """
         Initialize the GUI.
         
@@ -27,14 +31,18 @@ class ResourceMonitorGUI:
             root: Tkinter root window
             collector: ResourceCollector instance
             update_interval: GUI update interval in milliseconds (default: 1000ms = 1 second)
+            db_path: Path to database file for historical data
         """
         self.root = root
         self.collector = collector
         self.update_interval = update_interval
         
+        # Database storage for historical data
+        self.db_storage = ResourceDataStorage(db_path)
+        
         # Configure window
         self.root.title("GUI Resource Monitor - Real-Time Display")
-        self.root.geometry("1200x800")
+        self.root.geometry("1400x900")
         self.root.configure(bg='#f0f0f0')
         
         # Data storage for graphs (keep last 60 data points)
@@ -45,6 +53,9 @@ class ResourceMonitorGUI:
         self.disk_data: List[float] = []
         self.network_sent_data: List[float] = []
         self.network_recv_data: List[float] = []
+        
+        # Historical data storage
+        self.historical_metrics: List[ResourceMetrics] = []
         
         # Create GUI components
         self._create_widgets()
@@ -84,6 +95,11 @@ class ResourceMonitorGUI:
         stats_frame = ttk.Frame(notebook, padding="10")
         notebook.add(stats_frame, text="Current Statistics")
         self._create_stats_tab(stats_frame)
+        
+        # Tab 3: Historical Data
+        historical_frame = ttk.Frame(notebook, padding="10")
+        notebook.add(historical_frame, text="Historical Data")
+        self._create_historical_tab(historical_frame)
         
         # Status bar
         self.status_label = tk.Label(
@@ -240,6 +256,319 @@ class ResourceMonitorGUI:
         )
         self.timestamp_label.pack(side=tk.BOTTOM, pady=10)
     
+    def _create_historical_tab(self, parent):
+        """Create the historical data visualization tab."""
+        # Top control panel
+        control_frame = ttk.LabelFrame(parent, text="Time Range Selection", padding="10")
+        control_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Start time
+        ttk.Label(control_frame, text="Start Time:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        self.hist_start_date = tk.StringVar(value=(datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d"))
+        self.hist_start_time = tk.StringVar(value=(datetime.now() - timedelta(hours=1)).strftime("%H:%M:%S"))
+        ttk.Entry(control_frame, textvariable=self.hist_start_date, width=12).grid(row=0, column=1, padx=2)
+        ttk.Entry(control_frame, textvariable=self.hist_start_time, width=10).grid(row=0, column=2, padx=2)
+        
+        # End time
+        ttk.Label(control_frame, text="End Time:").grid(row=0, column=3, padx=5, pady=5, sticky=tk.W)
+        self.hist_end_date = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+        self.hist_end_time = tk.StringVar(value=datetime.now().strftime("%H:%M:%S"))
+        ttk.Entry(control_frame, textvariable=self.hist_end_date, width=12).grid(row=0, column=4, padx=2)
+        ttk.Entry(control_frame, textvariable=self.hist_end_time, width=10).grid(row=0, column=5, padx=2)
+        
+        # Quick select buttons
+        quick_frame = ttk.Frame(control_frame)
+        quick_frame.grid(row=0, column=6, padx=10)
+        ttk.Button(quick_frame, text="Last Hour", command=lambda: self._set_time_range(1)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(quick_frame, text="Last 6 Hours", command=lambda: self._set_time_range(6)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(quick_frame, text="Last 24 Hours", command=lambda: self._set_time_range(24)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(quick_frame, text="All Data", command=self._set_time_range_all).pack(side=tk.LEFT, padx=2)
+        
+        # Load button
+        ttk.Button(control_frame, text="Load Historical Data", command=self._load_historical_data).grid(row=0, column=7, padx=10)
+        
+        # Info label
+        self.hist_info_label = tk.Label(
+            control_frame,
+            text="Select time range and click 'Load Historical Data'",
+            font=("Arial", 9),
+            fg='gray'
+        )
+        self.hist_info_label.grid(row=1, column=0, columnspan=8, pady=5)
+        
+        # Graphs container
+        graphs_container = ttk.Frame(parent)
+        graphs_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        graphs_container.columnconfigure(0, weight=1)
+        graphs_container.columnconfigure(1, weight=1)
+        graphs_container.rowconfigure(0, weight=1)
+        graphs_container.rowconfigure(1, weight=1)
+        
+        # Historical CPU Graph
+        cpu_frame = ttk.Frame(graphs_container)
+        cpu_frame.grid(row=0, column=0, padx=5, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
+        cpu_frame.columnconfigure(0, weight=1)
+        cpu_frame.rowconfigure(0, weight=1)
+        cpu_frame.rowconfigure(1, weight=0)  # Toolbar row
+        self.hist_cpu_fig = Figure(figsize=(6, 4), dpi=100, facecolor='white')
+        self.hist_cpu_ax = self.hist_cpu_fig.add_subplot(111)
+        self.hist_cpu_ax.set_title("Historical CPU Usage (%)", fontsize=12, fontweight='bold')
+        self.hist_cpu_ax.set_ylabel("Percentage (%)")
+        self.hist_cpu_ax.grid(True, alpha=0.3)
+        self.hist_cpu_canvas = FigureCanvasTkAgg(self.hist_cpu_fig, cpu_frame)
+        self.hist_cpu_canvas.get_tk_widget().grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        # Toolbar in separate frame that uses pack
+        cpu_toolbar_frame = tk.Frame(cpu_frame)
+        cpu_toolbar_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        hist_cpu_toolbar = NavigationToolbar2Tk(self.hist_cpu_canvas, cpu_toolbar_frame)
+        hist_cpu_toolbar.update()
+        
+        # Historical Memory Graph
+        memory_frame = ttk.Frame(graphs_container)
+        memory_frame.grid(row=0, column=1, padx=5, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
+        memory_frame.columnconfigure(0, weight=1)
+        memory_frame.rowconfigure(0, weight=1)
+        memory_frame.rowconfigure(1, weight=0)  # Toolbar row
+        self.hist_memory_fig = Figure(figsize=(6, 4), dpi=100, facecolor='white')
+        self.hist_memory_ax = self.hist_memory_fig.add_subplot(111)
+        self.hist_memory_ax.set_title("Historical Memory Usage (%)", fontsize=12, fontweight='bold')
+        self.hist_memory_ax.set_ylabel("Percentage (%)")
+        self.hist_memory_ax.grid(True, alpha=0.3)
+        self.hist_memory_canvas = FigureCanvasTkAgg(self.hist_memory_fig, memory_frame)
+        self.hist_memory_canvas.get_tk_widget().grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        # Toolbar in separate frame that uses pack
+        memory_toolbar_frame = tk.Frame(memory_frame)
+        memory_toolbar_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        hist_memory_toolbar = NavigationToolbar2Tk(self.hist_memory_canvas, memory_toolbar_frame)
+        hist_memory_toolbar.update()
+        
+        # Historical Disk Graph
+        disk_frame = ttk.Frame(graphs_container)
+        disk_frame.grid(row=1, column=0, padx=5, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
+        disk_frame.columnconfigure(0, weight=1)
+        disk_frame.rowconfigure(0, weight=1)
+        disk_frame.rowconfigure(1, weight=0)  # Toolbar row
+        self.hist_disk_fig = Figure(figsize=(6, 4), dpi=100, facecolor='white')
+        self.hist_disk_ax = self.hist_disk_fig.add_subplot(111)
+        self.hist_disk_ax.set_title("Historical Disk Usage (%)", fontsize=12, fontweight='bold')
+        self.hist_disk_ax.set_ylabel("Percentage (%)")
+        self.hist_disk_ax.grid(True, alpha=0.3)
+        self.hist_disk_canvas = FigureCanvasTkAgg(self.hist_disk_fig, disk_frame)
+        self.hist_disk_canvas.get_tk_widget().grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        # Toolbar in separate frame that uses pack
+        disk_toolbar_frame = tk.Frame(disk_frame)
+        disk_toolbar_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        hist_disk_toolbar = NavigationToolbar2Tk(self.hist_disk_canvas, disk_toolbar_frame)
+        hist_disk_toolbar.update()
+        
+        # Historical Network Graph
+        network_frame = ttk.Frame(graphs_container)
+        network_frame.grid(row=1, column=1, padx=5, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
+        network_frame.columnconfigure(0, weight=1)
+        network_frame.rowconfigure(0, weight=1)
+        network_frame.rowconfigure(1, weight=0)  # Toolbar row
+        self.hist_network_fig = Figure(figsize=(6, 4), dpi=100, facecolor='white')
+        self.hist_network_ax = self.hist_network_fig.add_subplot(111)
+        self.hist_network_ax.set_title("Historical Network Usage (Mbps)", fontsize=12, fontweight='bold')
+        self.hist_network_ax.set_ylabel("Rate (Mbps)")
+        self.hist_network_ax.grid(True, alpha=0.3)
+        self.hist_network_canvas = FigureCanvasTkAgg(self.hist_network_fig, network_frame)
+        self.hist_network_canvas.get_tk_widget().grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        # Toolbar in separate frame that uses pack
+        network_toolbar_frame = tk.Frame(network_frame)
+        network_toolbar_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        hist_network_toolbar = NavigationToolbar2Tk(self.hist_network_canvas, network_toolbar_frame)
+        hist_network_toolbar.update()
+        
+        # Statistics panel
+        stats_panel = ttk.LabelFrame(parent, text="Statistics for Selected Range", padding="10")
+        stats_panel.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.hist_stats_label = tk.Label(
+            stats_panel,
+            text="Load data to see statistics",
+            font=("Arial", 10),
+            justify=tk.LEFT
+        )
+        self.hist_stats_label.pack(anchor=tk.W)
+    
+    def _set_time_range(self, hours: int):
+        """Set time range to last N hours."""
+        end_time = datetime.now()
+        start_time = end_time - timedelta(hours=hours)
+        
+        self.hist_start_date.set(start_time.strftime("%Y-%m-%d"))
+        self.hist_start_time.set(start_time.strftime("%H:%M:%S"))
+        self.hist_end_date.set(end_time.strftime("%Y-%m-%d"))
+        self.hist_end_time.set(end_time.strftime("%H:%M:%S"))
+    
+    def _set_time_range_all(self):
+        """Set time range to all available data."""
+        stats = self.db_storage.get_statistics()
+        if stats.get('oldest_timestamp') and stats.get('newest_timestamp'):
+            self.hist_start_date.set(stats['oldest_timestamp'].strftime("%Y-%m-%d"))
+            self.hist_start_time.set(stats['oldest_timestamp'].strftime("%H:%M:%S"))
+            self.hist_end_date.set(stats['newest_timestamp'].strftime("%Y-%m-%d"))
+            self.hist_end_time.set(stats['newest_timestamp'].strftime("%H:%M:%S"))
+        else:
+            messagebox.showinfo("Info", "No historical data available yet.")
+    
+    def _load_historical_data(self):
+        """Load historical data from database for selected time range."""
+        try:
+            # Parse start and end times
+            start_str = f"{self.hist_start_date.get()} {self.hist_start_time.get()}"
+            end_str = f"{self.hist_end_date.get()} {self.hist_end_time.get()}"
+            
+            start_time = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
+            end_time = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
+            
+            if start_time >= end_time:
+                messagebox.showerror("Error", "Start time must be before end time!")
+                return
+            
+            # Load data from database
+            self.hist_info_label.config(text="Loading data...")
+            self.root.update()
+            
+            self.historical_metrics = self.db_storage.get_metrics_by_time_range(start_time, end_time)
+            
+            if not self.historical_metrics:
+                messagebox.showinfo("Info", "No data found for the selected time range.")
+                self.hist_info_label.config(text="No data found for selected range")
+                return
+            
+            # Update graphs
+            self._update_historical_graphs()
+            
+            # Update statistics
+            self._update_historical_statistics()
+            
+            # Update info
+            self.hist_info_label.config(
+                text=f"Loaded {len(self.historical_metrics)} records from {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}"
+            )
+            
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid date/time format: {e}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error loading data: {e}")
+            self.hist_info_label.config(text="Error loading data")
+    
+    def _update_historical_graphs(self):
+        """Update historical graphs with loaded data."""
+        if not self.historical_metrics:
+            return
+        
+        # Extract data
+        timestamps = [m.timestamp for m in self.historical_metrics]
+        cpu_values = [m.cpu_percent for m in self.historical_metrics]
+        memory_values = [m.memory_percent for m in self.historical_metrics]
+        disk_values = [m.disk_percent for m in self.historical_metrics]
+        network_sent = [m.network_sent_rate_mbps for m in self.historical_metrics]
+        network_recv = [m.network_recv_rate_mbps for m in self.historical_metrics]
+        
+        # Determine time range to format X-axis appropriately
+        if timestamps:
+            time_span = (timestamps[-1] - timestamps[0]).total_seconds()
+            if time_span > 86400:  # More than 1 day
+                date_format = '%Y-%m-%d\n%H:%M'
+            elif time_span > 3600:  # More than 1 hour
+                date_format = '%m-%d %H:%M'
+            else:  # Less than 1 hour
+                date_format = '%H:%M:%S'
+        else:
+            date_format = '%H:%M:%S'
+        
+        # Update CPU graph
+        self.hist_cpu_ax.clear()
+        self.hist_cpu_ax.plot(timestamps, cpu_values, 'b-', linewidth=1.5, label='CPU')
+        self.hist_cpu_ax.set_title("Historical CPU Usage (%)", fontsize=12, fontweight='bold')
+        self.hist_cpu_ax.set_xlabel("Time")
+        self.hist_cpu_ax.set_ylabel("Percentage (%)")
+        self.hist_cpu_ax.set_ylim(0, 100)
+        if timestamps:
+            self.hist_cpu_ax.set_xlim(timestamps[0], timestamps[-1])
+        self.hist_cpu_ax.grid(True, alpha=0.3)
+        self.hist_cpu_ax.legend()
+        self.hist_cpu_ax.xaxis.set_major_formatter(DateFormatter(date_format))
+        self.hist_cpu_fig.autofmt_xdate()
+        self.hist_cpu_canvas.draw()
+        
+        # Update Memory graph
+        self.hist_memory_ax.clear()
+        self.hist_memory_ax.plot(timestamps, memory_values, 'g-', linewidth=1.5, label='Memory')
+        self.hist_memory_ax.set_title("Historical Memory Usage (%)", fontsize=12, fontweight='bold')
+        self.hist_memory_ax.set_xlabel("Time")
+        self.hist_memory_ax.set_ylabel("Percentage (%)")
+        self.hist_memory_ax.set_ylim(0, 100)
+        if timestamps:
+            self.hist_memory_ax.set_xlim(timestamps[0], timestamps[-1])
+        self.hist_memory_ax.grid(True, alpha=0.3)
+        self.hist_memory_ax.legend()
+        self.hist_memory_ax.xaxis.set_major_formatter(DateFormatter(date_format))
+        self.hist_memory_fig.autofmt_xdate()
+        self.hist_memory_canvas.draw()
+        
+        # Update Disk graph
+        self.hist_disk_ax.clear()
+        self.hist_disk_ax.plot(timestamps, disk_values, 'r-', linewidth=1.5, label='Disk')
+        self.hist_disk_ax.set_title("Historical Disk Usage (%)", fontsize=12, fontweight='bold')
+        self.hist_disk_ax.set_xlabel("Time")
+        self.hist_disk_ax.set_ylabel("Percentage (%)")
+        max_disk = max(disk_values) if disk_values else 100
+        self.hist_disk_ax.set_ylim(0, max(max_disk * 1.1, 10))
+        if timestamps:
+            self.hist_disk_ax.set_xlim(timestamps[0], timestamps[-1])
+        self.hist_disk_ax.grid(True, alpha=0.3)
+        self.hist_disk_ax.legend()
+        self.hist_disk_ax.xaxis.set_major_formatter(DateFormatter(date_format))
+        self.hist_disk_fig.autofmt_xdate()
+        self.hist_disk_canvas.draw()
+        
+        # Update Network graph
+        self.hist_network_ax.clear()
+        self.hist_network_ax.plot(timestamps, network_sent, 'c-', linewidth=1.5, label='Sent')
+        self.hist_network_ax.plot(timestamps, network_recv, 'm-', linewidth=1.5, label='Received')
+        self.hist_network_ax.set_title("Historical Network Usage (Mbps)", fontsize=12, fontweight='bold')
+        self.hist_network_ax.set_xlabel("Time")
+        self.hist_network_ax.set_ylabel("Rate (Mbps)")
+        max_network = max(max(network_sent) if network_sent else 0, max(network_recv) if network_recv else 0, 1)
+        self.hist_network_ax.set_ylim(0, max_network * 1.1)
+        if timestamps:
+            self.hist_network_ax.set_xlim(timestamps[0], timestamps[-1])
+        self.hist_network_ax.grid(True, alpha=0.3)
+        self.hist_network_ax.legend()
+        self.hist_network_ax.xaxis.set_major_formatter(DateFormatter(date_format))
+        self.hist_network_fig.autofmt_xdate()
+        self.hist_network_canvas.draw()
+    
+    def _update_historical_statistics(self):
+        """Update statistics panel with data for selected range."""
+        if not self.historical_metrics:
+            return
+        
+        # Calculate statistics
+        cpu_values = [m.cpu_percent for m in self.historical_metrics]
+        memory_values = [m.memory_percent for m in self.historical_metrics]
+        disk_values = [m.disk_percent for m in self.historical_metrics]
+        network_sent = [m.network_sent_rate_mbps for m in self.historical_metrics]
+        network_recv = [m.network_recv_rate_mbps for m in self.historical_metrics]
+        
+        stats_text = f"Records: {len(self.historical_metrics)}\n\n"
+        stats_text += f"CPU - Avg: {sum(cpu_values)/len(cpu_values):.2f}%, "
+        stats_text += f"Min: {min(cpu_values):.2f}%, Max: {max(cpu_values):.2f}%\n"
+        stats_text += f"Memory - Avg: {sum(memory_values)/len(memory_values):.2f}%, "
+        stats_text += f"Min: {min(memory_values):.2f}%, Max: {max(memory_values):.2f}%\n"
+        stats_text += f"Disk - Avg: {sum(disk_values)/len(disk_values):.2f}%, "
+        stats_text += f"Min: {min(disk_values):.2f}%, Max: {max(disk_values):.2f}%\n"
+        stats_text += f"Network Sent - Avg: {sum(network_sent)/len(network_sent):.2f} Mbps, "
+        stats_text += f"Max: {max(network_sent):.2f} Mbps\n"
+        stats_text += f"Network Received - Avg: {sum(network_recv)/len(network_recv):.2f} Mbps, "
+        stats_text += f"Max: {max(network_recv):.2f} Mbps"
+        
+        self.hist_stats_label.config(text=stats_text)
+    
     def _update_graphs(self, metrics: ResourceMetrics):
         """Update all graphs with new data."""
         # Add new data point
@@ -376,7 +705,7 @@ def main():
     
     # Create GUI
     root = tk.Tk()
-    app = ResourceMonitorGUI(root, collector, update_interval=1000)
+    app = ResourceMonitorGUI(root, collector, update_interval=1000, db_path="resource_monitor.db")
     
     # Handle window closing
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
