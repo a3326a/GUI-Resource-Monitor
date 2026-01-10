@@ -1,7 +1,21 @@
 """
-Phase 1: Resource Data Collection Module
-Collects real-time system resource metrics (CPU, memory, disk, network)
-and stores them with timestamps in memory.
+Phase 1: Resource Data Collection Module.
+
+This module provides functionality for collecting real-time system resource metrics
+including CPU usage, memory usage, disk I/O, and network activity. Metrics are
+collected periodically and stored in memory with timestamps. Optional database
+storage is supported for persistent historical tracking.
+
+Classes:
+    ResourceMetrics: Data class representing a single resource metrics snapshot.
+    ResourceCollector: Main class for collecting and managing resource metrics.
+
+Example:
+    >>> collector = ResourceCollector(collection_interval=1.0)
+    >>> collector.start_collection()
+    >>> # Wait for metrics to be collected
+    >>> latest = collector.get_latest_metrics()
+    >>> collector.stop_collection()
 """
 
 import time
@@ -14,7 +28,22 @@ import psutil
 
 @dataclass
 class ResourceMetrics:
-    """Data class to store resource metrics at a specific timestamp."""
+    """Data class representing a snapshot of system resource metrics.
+    
+    Attributes:
+        timestamp (datetime): When the metrics were collected.
+        cpu_percent (float): CPU usage percentage (0-100).
+        memory_percent (float): Memory usage percentage (0-100).
+        memory_used_mb (float): Memory used in megabytes.
+        memory_total_mb (float): Total memory available in megabytes.
+        disk_percent (float): Disk I/O activity percentage (0-100).
+        disk_used_gb (float): Disk space used in gigabytes.
+        disk_total_gb (float): Total disk space in gigabytes.
+        network_sent_mb (float): Total network data sent in megabytes.
+        network_recv_mb (float): Total network data received in megabytes.
+        network_sent_rate_mbps (float): Current network send rate in Mbps.
+        network_recv_rate_mbps (float): Current network receive rate in Mbps.
+    """
     timestamp: datetime
     cpu_percent: float
     memory_percent: float
@@ -30,19 +59,45 @@ class ResourceMetrics:
 
 
 class ResourceCollector:
-    """
-    Collects system resource metrics periodically and stores them in memory.
-    Optionally saves to database for persistent storage.
+    """Collects system resource metrics periodically and manages storage.
+    
+    This class provides thread-safe collection of system resource metrics including
+    CPU, memory, disk, and network usage. Metrics are collected at regular intervals
+    in a background thread and stored in memory. Optional automatic database storage
+    is supported with batch operations for efficiency.
+    
+    Attributes:
+        collection_interval (float): Time in seconds between metric collections.
+        metrics_history (List[ResourceMetrics]): In-memory storage of collected metrics.
+        is_collecting (bool): Flag indicating if collection is active.
+    
+    Example:
+        >>> collector = ResourceCollector(collection_interval=1.0, enable_database_storage=True)
+        >>> collector.start_collection()
+        >>> # Metrics are collected automatically in background
+        >>> latest = collector.get_latest_metrics()
+        >>> collector.stop_collection()
     """
     
-    def __init__(self, collection_interval: float = 1.0, enable_database_storage: bool = False, db_path: str = "resource_monitor.db"):
-        """
-        Initialize the resource collector.
+    def __init__(
+        self,
+        collection_interval: float = 1.0,
+        enable_database_storage: bool = False,
+        db_path: str = "resource_monitor.db"
+    ) -> None:
+        """Initialize the resource collector.
         
         Args:
-            collection_interval: Time in seconds between each collection (default: 1.0)
-            enable_database_storage: If True, automatically save metrics to database
-            db_path: Path to database file (only used if enable_database_storage is True)
+            collection_interval: Time in seconds between each metric collection.
+                Default is 1.0 second.
+            enable_database_storage: If True, automatically saves metrics to database
+                using batch operations. Default is False.
+            db_path: Path to SQLite database file. Only used if enable_database_storage
+                is True. Default is "resource_monitor.db".
+        
+        Note:
+            Database storage uses batch operations (saves every 10 metrics) to avoid
+            blocking the collection thread.
         """
         self.collection_interval = collection_interval
         self.metrics_history: List[ResourceMetrics] = []
@@ -71,13 +126,22 @@ class ResourceCollector:
             self.db_batch_buffer: List[ResourceMetrics] = []
     
     def _get_cpu_usage(self) -> float:
-        """Get current CPU usage percentage."""
+        """Get current CPU usage percentage.
+        
+        Returns:
+            float: CPU usage percentage (0-100). The measurement uses a 0.1 second
+                interval to balance accuracy and performance.
+        """
         return psutil.cpu_percent(interval=0.1)
     
     def _get_memory_usage(self) -> tuple[float, float, float]:
-        """
-        Get current memory usage.
-        Returns: (percentage, used_mb, total_mb)
+        """Get current memory usage statistics.
+        
+        Returns:
+            tuple[float, float, float]: A tuple containing:
+                - percentage: Memory usage percentage (0-100)
+                - used_mb: Memory used in megabytes
+                - total_mb: Total memory available in megabytes
         """
         memory = psutil.virtual_memory()
         return (
@@ -208,11 +272,19 @@ class ResourceCollector:
         return sent_mb, recv_mb, sent_rate, recv_rate
     
     def collect_metrics(self) -> ResourceMetrics:
-        """
-        Collect all current system resource metrics.
+        """Collect all current system resource metrics.
+        
+        This method gathers metrics for CPU, memory, disk, and network usage,
+        calculates rates where applicable, and returns a ResourceMetrics object
+        with the current system state.
         
         Returns:
-            ResourceMetrics object with current system state
+            ResourceMetrics: A dataclass instance containing all collected metrics
+                with the current timestamp.
+        
+        Note:
+            Network and disk rates are calculated based on time differences from
+            previous measurements.
         """
         timestamp = datetime.now()
         cpu_percent = self._get_cpu_usage()
@@ -235,8 +307,18 @@ class ResourceCollector:
             network_recv_rate_mbps=network_recv_rate
         )
     
-    def _collection_loop(self):
-        """Internal method that runs in a separate thread to collect metrics periodically."""
+    def _collection_loop(self) -> None:
+        """Internal method that runs in a separate thread to collect metrics periodically.
+        
+        This method runs continuously while is_collecting is True, collecting metrics
+        at the specified interval. It handles batch database saves automatically if
+        database storage is enabled. The loop sleeps for collection_interval seconds
+        between collections.
+        
+        Note:
+            This is an internal method and should not be called directly. Use
+            start_collection() to begin metric collection.
+        """
         while self.is_collecting:
             metrics = self.collect_metrics()
             
@@ -259,8 +341,17 @@ class ResourceCollector:
             
             time.sleep(self.collection_interval)
     
-    def start_collection(self):
-        """Start collecting metrics in a background thread."""
+    def start_collection(self) -> None:
+        """Start collecting metrics in a background thread.
+        
+        Creates and starts a daemon thread that periodically collects metrics
+        according to the collection_interval. If collection is already active,
+        this method does nothing.
+        
+        Note:
+            The collection thread is a daemon thread, so it will automatically
+            terminate when the main program exits.
+        """
         if self.is_collecting:
             return
         
@@ -268,8 +359,13 @@ class ResourceCollector:
         self.collection_thread = threading.Thread(target=self._collection_loop, daemon=True)
         self.collection_thread.start()
     
-    def stop_collection(self):
-        """Stop collecting metrics."""
+    def stop_collection(self) -> None:
+        """Stop collecting metrics and save any pending data.
+        
+        Stops the background collection thread and waits for it to finish
+        (with a 2 second timeout). If database storage is enabled, any remaining
+        buffered metrics are saved before stopping.
+        """
         self.is_collecting = False
         if self.collection_thread:
             self.collection_thread.join(timeout=2.0)
@@ -280,15 +376,29 @@ class ResourceCollector:
             self.db_batch_buffer.clear()
     
     def save_current_history_to_database(self, db_path: str = "resource_monitor.db") -> int:
-        """
-        Save current in-memory history to database.
-        Useful for one-time saves or when database storage wasn't enabled initially.
+        """Save current in-memory history to database.
+        
+        Useful for one-time saves when database storage wasn't enabled during
+        initialization, or for saving accumulated metrics before clearing history.
         
         Args:
-            db_path: Path to database file
-            
+            db_path: Path to the SQLite database file. If the file doesn't exist,
+                it will be created. Default is "resource_monitor.db".
+        
         Returns:
-            Number of records saved
+            int: Number of records successfully saved to the database. Returns 0
+                if no metrics are in memory or if an error occurs.
+        
+        Note:
+            This method uses batch insert for efficiency. All metrics in the
+            current history are saved in a single transaction.
+        
+        Example:
+            >>> collector = ResourceCollector()
+            >>> collector.start_collection()
+            >>> # ... collect some metrics ...
+            >>> collector.stop_collection()
+            >>> saved = collector.save_current_history_to_database("backup.db")
         """
         from data_storage import ResourceDataStorage
         storage = ResourceDataStorage(db_path)
@@ -301,24 +411,50 @@ class ResourceCollector:
         return 0
     
     def get_latest_metrics(self) -> Optional[ResourceMetrics]:
-        """Get the most recent collected metrics."""
+        """Get the most recent collected metrics.
+        
+        Returns:
+            Optional[ResourceMetrics]: The most recent metrics snapshot, or None
+                if no metrics have been collected yet.
+        
+        Note:
+            This method is thread-safe and returns a reference to the actual
+            metrics object. If you need to modify it, make a copy first.
+        """
         with self.lock:
             if self.metrics_history:
                 return self.metrics_history[-1]
             return None
     
     def get_metrics_history(self) -> List[ResourceMetrics]:
-        """Get all collected metrics history."""
+        """Get a copy of all collected metrics history.
+        
+        Returns:
+            List[ResourceMetrics]: A list containing all collected metrics in
+                chronological order (oldest first). The returned list is a copy,
+                so modifications to it won't affect the internal history.
+        """
         with self.lock:
             return self.metrics_history.copy()
     
-    def clear_history(self):
-        """Clear all stored metrics history."""
+    def clear_history(self) -> None:
+        """Clear all stored metrics history from memory.
+        
+        This removes all metrics from the in-memory history but does not affect
+        any metrics that have been saved to the database (if database storage
+        is enabled).
+        """
         with self.lock:
             self.metrics_history.clear()
     
     def get_history_count(self) -> int:
-        """Get the number of collected metrics."""
+        """Get the number of metrics currently stored in memory.
+        
+        Returns:
+            int: The number of metrics in the in-memory history. Note that this
+                does not include metrics that have been saved to the database
+                (if database storage is enabled).
+        """
         with self.lock:
             return len(self.metrics_history)
 

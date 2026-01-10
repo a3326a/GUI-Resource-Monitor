@@ -1,7 +1,29 @@
 """
-Phase 2, 4 & 5: GUI Design and Real-Time Display + Historical Data Visualization + Exporting Graphs and Reports
-Creates a GUI to display live resource usage with graphs and statistics,
-allows viewing historical data from the database, and enables exporting graphs as JPEG or PDF.
+Phase 2, 4, 5 & 6: Complete GUI Resource Monitor Application.
+
+A comprehensive resource monitoring application with real-time visualization,
+historical data analysis, and export capabilities. This application provides
+a user-friendly interface for monitoring system resources including CPU, memory,
+disk, and network usage.
+
+Features:
+    - Real-time resource monitoring with live updating graphs
+    - Historical data visualization with time range selection and filtering
+    - Export graphs as JPEG or PDF files with metadata
+    - Optimized performance with memory management and efficient rendering
+    - Comprehensive error handling and user feedback
+    - Thread-safe operations for data collection and storage
+
+Classes:
+    ResourceMonitorGUI: Main GUI application class managing the interface.
+
+Example:
+    >>> from resource_collector import ResourceCollector
+    >>> collector = ResourceCollector(collection_interval=1.0, enable_database_storage=True)
+    >>> collector.start_collection()
+    >>> root = tk.Tk()
+    >>> app = ResourceMonitorGUI(root, collector)
+    >>> root.mainloop()
 """
 
 import tkinter as tk
@@ -21,19 +43,52 @@ from data_storage import ResourceDataStorage
 
 
 class ResourceMonitorGUI:
-    """
-    GUI application for real-time resource monitoring with live graphs.
+    """GUI application for real-time resource monitoring with live graphs.
+    
+    This class manages the complete graphical user interface for the resource
+    monitor application. It handles real-time graph updates, historical data
+    visualization, data export, and user interactions.
+    
+    The GUI consists of three main tabs:
+        - Real-Time Graphs: Live updating graphs of current resource usage
+        - Current Statistics: Detailed statistics for current system state
+        - Historical Data: Time-range selection and historical data visualization
+    
+    Attributes:
+        root (tk.Tk): The main Tkinter root window.
+        collector (ResourceCollector): Resource collector instance providing metrics.
+        db_storage (ResourceDataStorage): Database storage for historical data.
+        max_data_points (int): Maximum number of data points in real-time graphs (60).
+        max_historical_in_memory (int): Maximum historical metrics kept in memory (10000).
+    
+    Example:
+        >>> collector = ResourceCollector(enable_database_storage=True)
+        >>> collector.start_collection()
+        >>> root = tk.Tk()
+        >>> app = ResourceMonitorGUI(root, collector, update_interval=1000)
+        >>> root.mainloop()
     """
     
-    def __init__(self, root: tk.Tk, collector: ResourceCollector, update_interval: int = 1000, db_path: str = "resource_monitor.db"):
-        """
-        Initialize the GUI.
+    def __init__(
+        self,
+        root: tk.Tk,
+        collector: ResourceCollector,
+        update_interval: int = 1000,
+        db_path: str = "resource_monitor.db"
+    ) -> None:
+        """Initialize the GUI application.
+        
+        Sets up the main window, creates all GUI components, initializes data
+        structures, and starts the periodic update loop.
         
         Args:
-            root: Tkinter root window
-            collector: ResourceCollector instance
-            update_interval: GUI update interval in milliseconds (default: 1000ms = 1 second)
-            db_path: Path to database file for historical data
+            root: Tkinter root window instance.
+            collector: ResourceCollector instance that provides system metrics.
+            update_interval: GUI update interval in milliseconds. Default is 1000ms
+                (1 second). Lower values provide more responsive updates but may
+                impact performance.
+            db_path: Path to SQLite database file for historical data storage.
+                Default is "resource_monitor.db".
         """
         self.root = root
         self.collector = collector
@@ -56,8 +111,13 @@ class ResourceMonitorGUI:
         self.network_sent_data: List[float] = []
         self.network_recv_data: List[float] = []
         
-        # Historical data storage
+        # Historical data storage (limit in memory to prevent excessive usage)
         self.historical_metrics: List[ResourceMetrics] = []
+        self.max_historical_in_memory = 10000  # Limit historical data kept in memory
+        
+        # Performance optimization: batch canvas updates
+        self._pending_graph_update = False
+        self._pending_stats_update = False
         
         # Create GUI components
         self._create_widgets()
@@ -73,7 +133,10 @@ class ResourceMonitorGUI:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
+        # Configure rows: row 0 (title) - no weight, row 1 (notebook) - expand, row 2 (status) - no weight
+        main_frame.rowconfigure(0, weight=0)
         main_frame.rowconfigure(1, weight=1)
+        main_frame.rowconfigure(2, weight=0)
         
         # Title
         title_label = tk.Label(
@@ -82,7 +145,7 @@ class ResourceMonitorGUI:
             font=("Arial", 18, "bold"),
             bg='#f0f0f0'
         )
-        title_label.grid(row=0, column=0, pady=(0, 10))
+        title_label.grid(row=0, column=0, pady=(0, 10), sticky=(tk.W, tk.E))
         
         # Create notebook for tabs
         notebook = ttk.Notebook(main_frame)
@@ -103,15 +166,24 @@ class ResourceMonitorGUI:
         notebook.add(historical_frame, text="Historical Data")
         self._create_historical_tab(historical_frame)
         
-        # Status bar
+        # Status bar - make it more visible with a border/background
+        status_frame = ttk.Frame(main_frame)
+        status_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(10, 0))
+        status_frame.columnconfigure(0, weight=1)
+        
         self.status_label = tk.Label(
-            main_frame,
+            status_frame,
             text="Status: Initializing...",
             font=("Arial", 9),
-            bg='#f0f0f0',
-            anchor=tk.W
+            bg='#e0e0e0',  # Slightly darker background for visibility
+            fg='#000000',
+            anchor=tk.W,
+            relief=tk.SUNKEN,  # Give it a sunken border to look like a status bar
+            borderwidth=1,
+            padx=5,
+            pady=2
         )
-        self.status_label.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(10, 0))
+        self.status_label.grid(row=0, column=0, sticky=(tk.W, tk.E))
     
     def _create_graphs_tab(self, parent):
         """Create the graphs tab with real-time charts."""
@@ -179,10 +251,11 @@ class ResourceMonitorGUI:
         export_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=5, pady=5)
         
         ttk.Button(export_frame, text="Export All Graphs as PDF", command=self._export_realtime_all_pdf).pack(side=tk.LEFT, padx=5)
-        ttk.Button(export_frame, text="Export CPU as JPEG", command=lambda: self._export_single_graph(self.cpu_fig, "CPU_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(export_frame, text="Export Memory as JPEG", command=lambda: self._export_single_graph(self.memory_fig, "Memory_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(export_frame, text="Export Disk as JPEG", command=lambda: self._export_single_graph(self.disk_fig, "Disk_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(export_frame, text="Export Network as JPEG", command=lambda: self._export_single_graph(self.network_fig, "Network_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
+        # Real-time graphs are always available (is_historical=False)
+        ttk.Button(export_frame, text="Export CPU as JPEG", command=lambda: self._export_single_graph(self.cpu_fig, "CPU_Usage", "JPEG", is_historical=False)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(export_frame, text="Export Memory as JPEG", command=lambda: self._export_single_graph(self.memory_fig, "Memory_Usage", "JPEG", is_historical=False)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(export_frame, text="Export Disk as JPEG", command=lambda: self._export_single_graph(self.disk_fig, "Disk_Usage", "JPEG", is_historical=False)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(export_frame, text="Export Network as JPEG", command=lambda: self._export_single_graph(self.network_fig, "Network_Usage", "JPEG", is_historical=False)).pack(side=tk.LEFT, padx=5)
     
     def _create_stats_tab(self, parent):
         """Create the statistics tab with current values."""
@@ -309,7 +382,24 @@ class ResourceMonitorGUI:
         )
         self.hist_info_label.grid(row=1, column=0, columnspan=8, pady=5)
         
-        # Graphs container
+        # Export buttons frame for historical data - PLACED RIGHT AFTER CONTROL PANEL for visibility
+        hist_export_frame = ttk.LabelFrame(parent, text="Export Historical Graphs", padding="10")
+        hist_export_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # First row of export buttons
+        export_row1 = ttk.Frame(hist_export_frame)
+        export_row1.pack(fill=tk.X, pady=(0, 5))
+        ttk.Button(export_row1, text="Export All as PDF", command=self._export_historical_all_pdf).pack(side=tk.LEFT, padx=5)
+        ttk.Button(export_row1, text="Export CPU as JPEG", command=lambda: self._export_single_graph(self.hist_cpu_fig, "Historical_CPU_Usage", "JPEG", is_historical=True)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(export_row1, text="Export Memory as JPEG", command=lambda: self._export_single_graph(self.hist_memory_fig, "Historical_Memory_Usage", "JPEG", is_historical=True)).pack(side=tk.LEFT, padx=5)
+        
+        # Second row of export buttons
+        export_row2 = ttk.Frame(hist_export_frame)
+        export_row2.pack(fill=tk.X)
+        ttk.Button(export_row2, text="Export Disk as JPEG", command=lambda: self._export_single_graph(self.hist_disk_fig, "Historical_Disk_Usage", "JPEG", is_historical=True)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(export_row2, text="Export Network as JPEG", command=lambda: self._export_single_graph(self.hist_network_fig, "Historical_Network_Usage", "JPEG", is_historical=True)).pack(side=tk.LEFT, padx=5)
+        
+        # Graphs container - now it won't hide the export buttons
         graphs_container = ttk.Frame(parent)
         graphs_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         graphs_container.columnconfigure(0, weight=1)
@@ -393,7 +483,7 @@ class ResourceMonitorGUI:
         hist_network_toolbar = NavigationToolbar2Tk(self.hist_network_canvas, network_toolbar_frame)
         hist_network_toolbar.update()
         
-        # Statistics panel
+        # Statistics panel - placed after graphs
         stats_panel = ttk.LabelFrame(parent, text="Statistics for Selected Range", padding="10")
         stats_panel.pack(fill=tk.X, padx=5, pady=5)
         
@@ -404,16 +494,6 @@ class ResourceMonitorGUI:
             justify=tk.LEFT
         )
         self.hist_stats_label.pack(anchor=tk.W)
-        
-        # Export buttons frame for historical data
-        hist_export_frame = ttk.LabelFrame(parent, text="Export Historical Graphs", padding="10")
-        hist_export_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        ttk.Button(hist_export_frame, text="Export All Historical Graphs as PDF", command=self._export_historical_all_pdf).pack(side=tk.LEFT, padx=5)
-        ttk.Button(hist_export_frame, text="Export CPU as JPEG", command=lambda: self._export_single_graph(self.hist_cpu_fig, "Historical_CPU_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(hist_export_frame, text="Export Memory as JPEG", command=lambda: self._export_single_graph(self.hist_memory_fig, "Historical_Memory_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(hist_export_frame, text="Export Disk as JPEG", command=lambda: self._export_single_graph(self.hist_disk_fig, "Historical_Disk_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(hist_export_frame, text="Export Network as JPEG", command=lambda: self._export_single_graph(self.hist_network_fig, "Historical_Network_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
     
     def _set_time_range(self, hours: int):
         """Set time range to last N hours."""
@@ -439,57 +519,113 @@ class ResourceMonitorGUI:
     def _load_historical_data(self):
         """Load historical data from database for selected time range."""
         try:
-            # Parse start and end times
+            # Parse start and end times with validation
             start_str = f"{self.hist_start_date.get()} {self.hist_start_time.get()}"
             end_str = f"{self.hist_end_date.get()} {self.hist_end_time.get()}"
             
-            start_time = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
-            end_time = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
+            try:
+                start_time = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
+                end_time = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
+            except ValueError as ve:
+                messagebox.showerror("Error", f"Invalid date/time format.\n\nExpected format: YYYY-MM-DD HH:MM:SS\nExample: 2026-01-09 14:30:00\n\nError: {ve}")
+                return
             
             if start_time >= end_time:
                 messagebox.showerror("Error", "Start time must be before end time!")
                 return
             
-            # Load data from database
-            self.hist_info_label.config(text="Loading data...")
+            # Check for reasonable time range (warn if > 30 days)
+            time_diff = (end_time - start_time).total_seconds()
+            if time_diff > 30 * 24 * 3600:  # 30 days
+                response = messagebox.askyesno(
+                    "Large Time Range",
+                    f"The selected time range is {time_diff/(24*3600):.1f} days.\n"
+                    f"This may take a while to load and display.\n\n"
+                    f"Do you want to continue?"
+                )
+                if not response:
+                    return
+            
+            # Load data from database with progress indication
+            self.hist_info_label.config(text="Loading data from database... Please wait.")
             self.root.update()
             
-            self.historical_metrics = self.db_storage.get_metrics_by_time_range(start_time, end_time)
+            # Load in a separate thread to avoid blocking UI
+            def load_data():
+                try:
+                    metrics = self.db_storage.get_metrics_by_time_range(start_time, end_time)
+                    
+                    # Limit stored metrics in memory
+                    if len(metrics) > self.max_historical_in_memory:
+                        # Keep only most recent N metrics
+                        metrics = metrics[-self.max_historical_in_memory:]
+                        self.hist_info_label.config(
+                            text=f"Warning: Only showing last {self.max_historical_in_memory:,} of {len(metrics):,} records for performance."
+                        )
+                    
+                    self.historical_metrics = metrics
+                    
+                    # Update graphs and statistics on main thread
+                    self.root.after(0, self._update_after_load, start_time, end_time)
+                except Exception as e:
+                    self.root.after(0, lambda: messagebox.showerror("Error", f"Error loading data: {e}"))
+                    self.root.after(0, lambda: self.hist_info_label.config(text="Error loading data"))
             
-            if not self.historical_metrics:
-                messagebox.showinfo("Info", "No data found for the selected time range.")
-                self.hist_info_label.config(text="No data found for selected range")
-                return
+            # Start loading in background
+            import threading
+            thread = threading.Thread(target=load_data, daemon=True)
+            thread.start()
             
-            # Update graphs
-            self._update_historical_graphs()
-            
-            # Update statistics
-            self._update_historical_statistics()
-            
-            # Update info
-            self.hist_info_label.config(
-                text=f"Loaded {len(self.historical_metrics)} records from {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}"
-            )
-            
-        except ValueError as e:
-            messagebox.showerror("Error", f"Invalid date/time format: {e}")
         except Exception as e:
-            messagebox.showerror("Error", f"Error loading data: {e}")
+            messagebox.showerror("Error", f"Unexpected error: {e}")
             self.hist_info_label.config(text="Error loading data")
+    
+    def _update_after_load(self, start_time: datetime, end_time: datetime):
+        """Update graphs and statistics after data is loaded."""
+        if not self.historical_metrics:
+            messagebox.showinfo("Info", "No data found for the selected time range.")
+            self.hist_info_label.config(text="No data found for selected range")
+            return
+        
+        # Update graphs
+        self._update_historical_graphs()
+        
+        # Update statistics
+        self._update_historical_statistics()
+        
+        # Update info
+        total_records = len(self.historical_metrics)
+        if total_records > self.max_historical_in_memory:
+            self.hist_info_label.config(
+                text=f"Loaded {total_records:,} records (showing last {self.max_historical_in_memory:,}) from {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}"
+            )
+        else:
+            self.hist_info_label.config(
+                text=f"Loaded {total_records:,} records from {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}"
+            )
     
     def _update_historical_graphs(self):
         """Update historical graphs with loaded data."""
         if not self.historical_metrics:
             return
         
-        # Extract data
-        timestamps = [m.timestamp for m in self.historical_metrics]
-        cpu_values = [m.cpu_percent for m in self.historical_metrics]
-        memory_values = [m.memory_percent for m in self.historical_metrics]
-        disk_values = [m.disk_percent for m in self.historical_metrics]
-        network_sent = [m.network_sent_rate_mbps for m in self.historical_metrics]
-        network_recv = [m.network_recv_rate_mbps for m in self.historical_metrics]
+        # Limit data points if too many for better performance
+        # Sample data if more than threshold to avoid slow rendering
+        max_points_for_display = 5000
+        if len(self.historical_metrics) > max_points_for_display:
+            # Sample every Nth point for display
+            step = len(self.historical_metrics) // max_points_for_display
+            sampled_metrics = self.historical_metrics[::step]
+        else:
+            sampled_metrics = self.historical_metrics
+        
+        # Extract data from sampled metrics
+        timestamps = [m.timestamp for m in sampled_metrics]
+        cpu_values = [m.cpu_percent for m in sampled_metrics]
+        memory_values = [m.memory_percent for m in sampled_metrics]
+        disk_values = [m.disk_percent for m in sampled_metrics]
+        network_sent = [m.network_sent_rate_mbps for m in sampled_metrics]
+        network_recv = [m.network_recv_rate_mbps for m in sampled_metrics]
         
         # Determine time range to format X-axis appropriately
         if timestamps:
@@ -592,7 +728,7 @@ class ResourceMonitorGUI:
         
         self.hist_stats_label.config(text=stats_text)
     
-    def _export_single_graph(self, figure: Figure, default_name: str, file_format: str):
+    def _export_single_graph(self, figure: Figure, default_name: str, file_format: str, is_historical: bool = False):
         """
         Export a single graph to JPEG or PDF file.
         
@@ -600,21 +736,56 @@ class ResourceMonitorGUI:
             figure: Matplotlib Figure object to export
             default_name: Default filename (without extension)
             file_format: File format ('JPEG' or 'PDF')
+            is_historical: If True, check if historical data is loaded before exporting
         """
         try:
+            # Validate inputs
+            if figure is None or len(figure.axes) == 0:
+                messagebox.showerror("Error", "Cannot export: Graph figure is empty or invalid.")
+                return
+            
+            # For historical graphs, check if data is loaded
+            if is_historical:
+                if not self.historical_metrics:
+                    messagebox.showwarning(
+                        "No Data Loaded",
+                        "No historical data is currently loaded.\n\n"
+                        "Please:\n"
+                        "1. Select a time range (or use 'All Data')\n"
+                        "2. Click 'Load Historical Data'\n"
+                        "3. Then try exporting again."
+                    )
+                    return
+                
+                # Check if graph actually has data (has plotted lines)
+                ax = figure.axes[0]
+                if not ax.lines or len(ax.lines) == 0:
+                    messagebox.showwarning(
+                        "Empty Graph",
+                        "The historical graph is empty (no data to display).\n\n"
+                        "Please load historical data first."
+                    )
+                    return
+            
             # Generate default filename with timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            default_filename = f"{default_name}_{timestamp}"
+            # Sanitize filename (remove invalid characters)
+            safe_name = "".join(c for c in default_name if c.isalnum() or c in (' ', '-', '_')).strip()
+            safe_name = safe_name.replace(' ', '_')
+            default_filename = f"{safe_name}_{timestamp}"
             
             # Determine file extension and file type filter
-            if file_format.upper() == "JPEG":
+            file_format_upper = file_format.upper()
+            if file_format_upper == "JPEG" or file_format_upper == "JPG":
                 file_ext = ".jpg"
                 filetypes = [("JPEG files", "*.jpg"), ("JPEG files", "*.jpeg"), ("All files", "*.*")]
-            elif file_format.upper() == "PDF":
+                format_name = "jpeg"
+            elif file_format_upper == "PDF":
                 file_ext = ".pdf"
                 filetypes = [("PDF files", "*.pdf"), ("All files", "*.*")]
+                format_name = "pdf"
             else:
-                messagebox.showerror("Error", f"Unsupported file format: {file_format}")
+                messagebox.showerror("Error", f"Unsupported file format: {file_format}\nSupported formats: JPEG, PDF")
                 return
             
             # Ask user for save location
@@ -627,23 +798,54 @@ class ResourceMonitorGUI:
             if not filename:
                 return  # User cancelled
             
+            # Validate path is writable
+            try:
+                directory = os.path.dirname(filename) or os.getcwd()
+                if not os.access(directory, os.W_OK):
+                    messagebox.showerror("Error", f"Cannot write to directory:\n{directory}\n\nPlease select a writable location.")
+                    return
+            except Exception as e:
+                messagebox.showerror("Error", f"Invalid file path: {e}")
+                return
+            
             # Add timestamp to figure title if not already present
             current_title = figure.axes[0].get_title()
             timestamp_str = f" - Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            if timestamp_str not in current_title:
+            title_changed = timestamp_str not in current_title
+            if title_changed:
                 figure.axes[0].set_title(current_title + timestamp_str, fontsize=10)
             
-            # Save the figure
-            figure.savefig(filename, format=file_format.lower(), dpi=300, bbox_inches='tight')
+            # Save the figure with error handling
+            try:
+                figure.savefig(filename, format=format_name, dpi=300, bbox_inches='tight')
+            except Exception as save_error:
+                if title_changed:
+                    figure.axes[0].set_title(current_title)  # Restore title even on error
+                raise save_error
             
             # Restore original title
-            if timestamp_str in current_title:
-                figure.axes[0].set_title(current_title.replace(timestamp_str, ""))
+            if title_changed:
+                figure.axes[0].set_title(current_title)
             
-            messagebox.showinfo("Success", f"Graph exported successfully to:\n{filename}")
+            # Verify file was created
+            if os.path.exists(filename):
+                file_size = os.path.getsize(filename) / 1024  # Size in KB
+                messagebox.showinfo(
+                    "Success",
+                    f"Graph exported successfully!\n\n"
+                    f"File: {os.path.basename(filename)}\n"
+                    f"Location: {os.path.dirname(filename)}\n"
+                    f"Size: {file_size:.1f} KB"
+                )
+            else:
+                messagebox.showwarning("Warning", "Export completed, but file could not be verified.")
             
+        except PermissionError:
+            messagebox.showerror("Error", f"Permission denied. Cannot write to:\n{filename}\n\nFile may be open in another application.")
+        except OSError as e:
+            messagebox.showerror("Error", f"File system error:\n{e}\n\nPlease check disk space and permissions.")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to export graph:\n{str(e)}")
+            messagebox.showerror("Error", f"Failed to export graph:\n{str(e)}\n\nPlease try again or select a different location.")
     
     def _export_realtime_all_pdf(self):
         """Export all real-time graphs to a single PDF file."""
@@ -804,67 +1006,84 @@ class ResourceMonitorGUI:
             messagebox.showerror("Error", f"Failed to export graphs:\n{str(e)}")
     
     def _update_graphs(self, metrics: ResourceMetrics):
-        """Update all graphs with new data."""
-        # Add new data point
-        self.time_data.append(metrics.timestamp)
-        self.cpu_data.append(metrics.cpu_percent)
-        self.memory_data.append(metrics.memory_percent)
-        self.disk_data.append(metrics.disk_percent)
-        self.network_sent_data.append(metrics.network_sent_rate_mbps)
-        self.network_recv_data.append(metrics.network_recv_rate_mbps)
-        
-        # Keep only last N data points
-        if len(self.time_data) > self.max_data_points:
-            self.time_data.pop(0)
-            self.cpu_data.pop(0)
-            self.memory_data.pop(0)
-            self.disk_data.pop(0)
-            self.network_sent_data.pop(0)
-            self.network_recv_data.pop(0)
-        
-        # Format time labels (show only time, not date)
-        time_labels = [t.strftime('%H:%M:%S') for t in self.time_data]
-        
-        # Update CPU graph
-        self.cpu_line.set_data(range(len(self.cpu_data)), self.cpu_data)
-        self.cpu_ax.set_xlim(0, len(self.cpu_data) - 1 if len(self.cpu_data) > 1 else 1)
-        if len(self.time_data) > 0:
-            # Show only some labels to avoid crowding
-            step = max(1, len(time_labels) // 10)
-            self.cpu_ax.set_xticks(range(0, len(time_labels), step))
-            self.cpu_ax.set_xticklabels([time_labels[i] for i in range(0, len(time_labels), step)], rotation=45)
-        self.cpu_canvas.draw()
-        
-        # Update Memory graph
-        self.memory_line.set_data(range(len(self.memory_data)), self.memory_data)
-        self.memory_ax.set_xlim(0, len(self.memory_data) - 1 if len(self.memory_data) > 1 else 1)
-        if len(self.time_data) > 0:
-            step = max(1, len(time_labels) // 10)
-            self.memory_ax.set_xticks(range(0, len(time_labels), step))
-            self.memory_ax.set_xticklabels([time_labels[i] for i in range(0, len(time_labels), step)], rotation=45)
-        self.memory_canvas.draw()
-        
-        # Update Disk graph
-        self.disk_line.set_data(range(len(self.disk_data)), self.disk_data)
-        self.disk_ax.set_xlim(0, len(self.disk_data) - 1 if len(self.disk_data) > 1 else 1)
-        if len(self.time_data) > 0:
-            step = max(1, len(time_labels) // 10)
-            self.disk_ax.set_xticks(range(0, len(time_labels), step))
-            self.disk_ax.set_xticklabels([time_labels[i] for i in range(0, len(time_labels), step)], rotation=45)
-        self.disk_canvas.draw()
-        
-        # Update Network graph
-        max_network = max(max(self.network_sent_data) if self.network_sent_data else 0,
-                         max(self.network_recv_data) if self.network_recv_data else 0, 1)
-        self.network_ax.set_ylim(0, max_network * 1.1)
-        self.network_sent_line.set_data(range(len(self.network_sent_data)), self.network_sent_data)
-        self.network_recv_line.set_data(range(len(self.network_recv_data)), self.network_recv_data)
-        self.network_ax.set_xlim(0, len(self.network_sent_data) - 1 if len(self.network_sent_data) > 1 else 1)
-        if len(self.time_data) > 0:
-            step = max(1, len(time_labels) // 10)
-            self.network_ax.set_xticks(range(0, len(time_labels), step))
-            self.network_ax.set_xticklabels([time_labels[i] for i in range(0, len(time_labels), step)], rotation=45)
-        self.network_canvas.draw()
+        """Update all graphs with new data - optimized to avoid unnecessary redraws."""
+        try:
+            # Add new data point
+            self.time_data.append(metrics.timestamp)
+            self.cpu_data.append(metrics.cpu_percent)
+            self.memory_data.append(metrics.memory_percent)
+            self.disk_data.append(metrics.disk_percent)
+            self.network_sent_data.append(metrics.network_sent_rate_mbps)
+            self.network_recv_data.append(metrics.network_recv_rate_mbps)
+            
+            # Keep only last N data points (use deque-like approach for better performance)
+            if len(self.time_data) > self.max_data_points:
+                self.time_data = self.time_data[-self.max_data_points:]
+                self.cpu_data = self.cpu_data[-self.max_data_points:]
+                self.memory_data = self.memory_data[-self.max_data_points:]
+                self.disk_data = self.disk_data[-self.max_data_points:]
+                self.network_sent_data = self.network_sent_data[-self.max_data_points:]
+                self.network_recv_data = self.network_recv_data[-self.max_data_points:]
+            
+            # Only update labels periodically to reduce overhead
+            data_length = len(self.time_data)
+            if data_length == 0:
+                return
+            
+            # Format time labels only when needed (every 5 updates or when length changes significantly)
+            update_labels = (data_length % 5 == 0) or (data_length < 10)
+            if update_labels:
+                time_labels = [t.strftime('%H:%M:%S') for t in self.time_data]
+                step = max(1, len(time_labels) // 10)
+            
+            # Update CPU graph
+            indices = list(range(data_length))
+            self.cpu_line.set_data(indices, self.cpu_data)
+            self.cpu_ax.set_xlim(-0.5, data_length - 0.5 if data_length > 1 else 1.5)
+            if update_labels and data_length > 0:
+                self.cpu_ax.set_xticks(indices[::step] if step > 0 else indices)
+                self.cpu_ax.set_xticklabels([time_labels[i] for i in indices[::step] if i < len(time_labels)], rotation=45)
+            self.cpu_canvas.draw_idle()  # Use draw_idle instead of draw for better performance
+            
+            # Update Memory graph
+            self.memory_line.set_data(indices, self.memory_data)
+            self.memory_ax.set_xlim(-0.5, data_length - 0.5 if data_length > 1 else 1.5)
+            if update_labels and data_length > 0:
+                self.memory_ax.set_xticks(indices[::step] if step > 0 else indices)
+                self.memory_ax.set_xticklabels([time_labels[i] for i in indices[::step] if i < len(time_labels)], rotation=45)
+            self.memory_canvas.draw_idle()
+            
+            # Update Disk graph
+            self.disk_line.set_data(indices, self.disk_data)
+            self.disk_ax.set_xlim(-0.5, data_length - 0.5 if data_length > 1 else 1.5)
+            if update_labels and data_length > 0:
+                self.disk_ax.set_xticks(indices[::step] if step > 0 else indices)
+                self.disk_ax.set_xticklabels([time_labels[i] for i in indices[::step] if i < len(time_labels)], rotation=45)
+            self.disk_canvas.draw_idle()
+            
+            # Update Network graph
+            max_network = max(
+                max(self.network_sent_data) if self.network_sent_data else 0,
+                max(self.network_recv_data) if self.network_recv_data else 0,
+                1
+            )
+            # Only update ylim if it changed significantly (avoid unnecessary updates)
+            current_ylim = self.network_ax.get_ylim()
+            new_ylim = (0, max_network * 1.1)
+            if abs(current_ylim[1] - new_ylim[1]) > new_ylim[1] * 0.1:  # 10% change threshold
+                self.network_ax.set_ylim(new_ylim)
+            
+            self.network_sent_line.set_data(indices, self.network_sent_data)
+            self.network_recv_line.set_data(indices, self.network_recv_data)
+            self.network_ax.set_xlim(-0.5, data_length - 0.5 if data_length > 1 else 1.5)
+            if update_labels and data_length > 0:
+                self.network_ax.set_xticks(indices[::step] if step > 0 else indices)
+                self.network_ax.set_xticklabels([time_labels[i] for i in indices[::step] if i < len(time_labels)], rotation=45)
+            self.network_canvas.draw_idle()
+            
+        except Exception as e:
+            # Log error but don't crash - just update status
+            self.status_label.config(text=f"Status: Error updating graphs - {str(e)[:50]}")
     
     def _update_statistics(self, metrics: ResourceMetrics):
         """Update statistics display with current values."""
@@ -898,23 +1117,29 @@ class ResourceMonitorGUI:
     
     def _update_gui(self):
         """Main GUI update loop - called periodically."""
-        latest_metrics = self.collector.get_latest_metrics()
-        
-        if latest_metrics:
-            # Update graphs
-            self._update_graphs(latest_metrics)
+        try:
+            latest_metrics = self.collector.get_latest_metrics()
             
-            # Update statistics
-            self._update_statistics(latest_metrics)
-            
-            # Update status
-            total_metrics = self.collector.get_history_count()
-            self.status_label.config(
-                text=f"Status: Running | Metrics Collected: {total_metrics} | "
-                     f"Data Points in Graphs: {len(self.time_data)}"
-            )
-        else:
-            self.status_label.config(text="Status: Waiting for data...")
+            if latest_metrics:
+                # Update graphs
+                self._update_graphs(latest_metrics)
+                
+                # Update statistics
+                self._update_statistics(latest_metrics)
+                
+                # Update status with performance info
+                total_metrics = self.collector.get_history_count()
+                db_stats = self.db_storage.get_statistics()
+                db_count = db_stats.get('total_records', 0)
+                
+                self.status_label.config(
+                    text=f"Status: Running | Memory Metrics: {total_metrics} | "
+                         f"DB Records: {db_count:,} | Graph Points: {len(self.time_data)}/{self.max_data_points}"
+                )
+            else:
+                self.status_label.config(text="Status: Waiting for data...")
+        except Exception as e:
+            self.status_label.config(text=f"Status: Error - {str(e)[:50]}")
         
         # Schedule next update
         self.root.after(self.update_interval, self._update_gui)
