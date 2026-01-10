@@ -1,19 +1,21 @@
 """
-Phase 2 & 4: GUI Design and Real-Time Display + Historical Data Visualization
+Phase 2, 4 & 5: GUI Design and Real-Time Display + Historical Data Visualization + Exporting Graphs and Reports
 Creates a GUI to display live resource usage with graphs and statistics,
-and allows viewing historical data from the database.
+allows viewing historical data from the database, and enables exporting graphs as JPEG or PDF.
 """
 
 import tkinter as tk
 from tkinter import ttk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.animation import FuncAnimation
 import matplotlib.pyplot as plt
 from matplotlib.dates import DateFormatter
 from datetime import datetime, timedelta
 from typing import List, Optional
+import os
 from resource_collector import ResourceCollector, ResourceMetrics
 from data_storage import ResourceDataStorage
 
@@ -41,7 +43,7 @@ class ResourceMonitorGUI:
         self.db_storage = ResourceDataStorage(db_path)
         
         # Configure window
-        self.root.title("GUI Resource Monitor - Real-Time Display")
+        self.root.title("GUI Resource Monitor")
         self.root.geometry("1400x900")
         self.root.configure(bg='#f0f0f0')
         
@@ -118,6 +120,7 @@ class ResourceMonitorGUI:
         parent.columnconfigure(1, weight=1)
         parent.rowconfigure(0, weight=1)
         parent.rowconfigure(1, weight=1)
+        parent.rowconfigure(2, weight=0)  # Export buttons row
         
         # CPU Graph
         self.cpu_fig = Figure(figsize=(5, 3), dpi=100, facecolor='white')
@@ -170,6 +173,16 @@ class ResourceMonitorGUI:
         self.network_ax.legend()
         self.network_canvas = FigureCanvasTkAgg(self.network_fig, parent)
         self.network_canvas.get_tk_widget().grid(row=1, column=1, padx=5, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Export buttons frame
+        export_frame = ttk.LabelFrame(parent, text="Export Real-Time Graphs", padding="10")
+        export_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=5, pady=5)
+        
+        ttk.Button(export_frame, text="Export All Graphs as PDF", command=self._export_realtime_all_pdf).pack(side=tk.LEFT, padx=5)
+        ttk.Button(export_frame, text="Export CPU as JPEG", command=lambda: self._export_single_graph(self.cpu_fig, "CPU_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(export_frame, text="Export Memory as JPEG", command=lambda: self._export_single_graph(self.memory_fig, "Memory_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(export_frame, text="Export Disk as JPEG", command=lambda: self._export_single_graph(self.disk_fig, "Disk_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(export_frame, text="Export Network as JPEG", command=lambda: self._export_single_graph(self.network_fig, "Network_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
     
     def _create_stats_tab(self, parent):
         """Create the statistics tab with current values."""
@@ -391,6 +404,16 @@ class ResourceMonitorGUI:
             justify=tk.LEFT
         )
         self.hist_stats_label.pack(anchor=tk.W)
+        
+        # Export buttons frame for historical data
+        hist_export_frame = ttk.LabelFrame(parent, text="Export Historical Graphs", padding="10")
+        hist_export_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Button(hist_export_frame, text="Export All Historical Graphs as PDF", command=self._export_historical_all_pdf).pack(side=tk.LEFT, padx=5)
+        ttk.Button(hist_export_frame, text="Export CPU as JPEG", command=lambda: self._export_single_graph(self.hist_cpu_fig, "Historical_CPU_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(hist_export_frame, text="Export Memory as JPEG", command=lambda: self._export_single_graph(self.hist_memory_fig, "Historical_Memory_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(hist_export_frame, text="Export Disk as JPEG", command=lambda: self._export_single_graph(self.hist_disk_fig, "Historical_Disk_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(hist_export_frame, text="Export Network as JPEG", command=lambda: self._export_single_graph(self.hist_network_fig, "Historical_Network_Usage", "JPEG")).pack(side=tk.LEFT, padx=5)
     
     def _set_time_range(self, hours: int):
         """Set time range to last N hours."""
@@ -568,6 +591,217 @@ class ResourceMonitorGUI:
         stats_text += f"Max: {max(network_recv):.2f} Mbps"
         
         self.hist_stats_label.config(text=stats_text)
+    
+    def _export_single_graph(self, figure: Figure, default_name: str, file_format: str):
+        """
+        Export a single graph to JPEG or PDF file.
+        
+        Args:
+            figure: Matplotlib Figure object to export
+            default_name: Default filename (without extension)
+            file_format: File format ('JPEG' or 'PDF')
+        """
+        try:
+            # Generate default filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_filename = f"{default_name}_{timestamp}"
+            
+            # Determine file extension and file type filter
+            if file_format.upper() == "JPEG":
+                file_ext = ".jpg"
+                filetypes = [("JPEG files", "*.jpg"), ("JPEG files", "*.jpeg"), ("All files", "*.*")]
+            elif file_format.upper() == "PDF":
+                file_ext = ".pdf"
+                filetypes = [("PDF files", "*.pdf"), ("All files", "*.*")]
+            else:
+                messagebox.showerror("Error", f"Unsupported file format: {file_format}")
+                return
+            
+            # Ask user for save location
+            filename = filedialog.asksaveasfilename(
+                defaultextension=file_ext,
+                filetypes=filetypes,
+                initialfile=default_filename
+            )
+            
+            if not filename:
+                return  # User cancelled
+            
+            # Add timestamp to figure title if not already present
+            current_title = figure.axes[0].get_title()
+            timestamp_str = f" - Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            if timestamp_str not in current_title:
+                figure.axes[0].set_title(current_title + timestamp_str, fontsize=10)
+            
+            # Save the figure
+            figure.savefig(filename, format=file_format.lower(), dpi=300, bbox_inches='tight')
+            
+            # Restore original title
+            if timestamp_str in current_title:
+                figure.axes[0].set_title(current_title.replace(timestamp_str, ""))
+            
+            messagebox.showinfo("Success", f"Graph exported successfully to:\n{filename}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export graph:\n{str(e)}")
+    
+    def _export_realtime_all_pdf(self):
+        """Export all real-time graphs to a single PDF file."""
+        try:
+            # Generate default filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_filename = f"RealTime_Graphs_All_{timestamp}.pdf"
+            
+            # Ask user for save location
+            filename = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+                initialfile=default_filename
+            )
+            
+            if not filename:
+                return  # User cancelled
+            
+            # Create a new figure with all graphs
+            with PdfPages(filename) as pdf:
+                # Save each graph
+                graphs = [
+                    (self.cpu_fig, "CPU Usage"),
+                    (self.memory_fig, "Memory Usage"),
+                    (self.disk_fig, "Disk Usage"),
+                    (self.network_fig, "Network Usage")
+                ]
+                
+                for fig, name in graphs:
+                    # Add export timestamp to title
+                    original_title = fig.axes[0].get_title()
+                    export_title = f"{original_title} - Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    fig.axes[0].set_title(export_title, fontsize=10)
+                    
+                    # Save to PDF
+                    pdf.savefig(fig, bbox_inches='tight', dpi=300)
+                    
+                    # Restore original title
+                    fig.axes[0].set_title(original_title)
+                
+                # Add metadata
+                d = pdf.infodict()
+                d['Title'] = 'Resource Monitor - Real-Time Graphs'
+                d['Author'] = 'GUI Resource Monitor'
+                d['Subject'] = 'System resource usage graphs'
+                d['Keywords'] = 'CPU, Memory, Disk, Network, Monitoring'
+                d['CreationDate'] = datetime.now()
+            
+            messagebox.showinfo("Success", f"All real-time graphs exported successfully to:\n{filename}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export graphs:\n{str(e)}")
+    
+    def _export_historical_all_pdf(self):
+        """Export all historical graphs to a single PDF file."""
+        try:
+            # Check if historical data is loaded
+            if not self.historical_metrics:
+                messagebox.showwarning("Warning", "No historical data loaded. Please load data first.")
+                return
+            
+            # Generate default filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_filename = f"Historical_Graphs_All_{timestamp}.pdf"
+            
+            # Ask user for save location
+            filename = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+                initialfile=default_filename
+            )
+            
+            if not filename:
+                return  # User cancelled
+            
+            # Create a new figure with all graphs
+            with PdfPages(filename) as pdf:
+                # Save each graph
+                graphs = [
+                    (self.hist_cpu_fig, "Historical CPU Usage"),
+                    (self.hist_memory_fig, "Historical Memory Usage"),
+                    (self.hist_disk_fig, "Historical Disk Usage"),
+                    (self.hist_network_fig, "Historical Network Usage")
+                ]
+                
+                # Get time range for metadata
+                if self.historical_metrics:
+                    start_time = self.historical_metrics[0].timestamp
+                    end_time = self.historical_metrics[-1].timestamp
+                    time_range_str = f"{start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}"
+                else:
+                    time_range_str = "N/A"
+                
+                for fig, name in graphs:
+                    # Add export timestamp and time range to title
+                    original_title = fig.axes[0].get_title()
+                    export_title = f"{original_title}\nTime Range: {time_range_str}\nExported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    fig.axes[0].set_title(export_title, fontsize=9)
+                    
+                    # Save to PDF
+                    pdf.savefig(fig, bbox_inches='tight', dpi=300)
+                    
+                    # Restore original title
+                    fig.axes[0].set_title(original_title)
+                
+                # Add statistics page if available
+                if self.historical_metrics:
+                    stats_fig = Figure(figsize=(8, 6), dpi=100)
+                    stats_ax = stats_fig.add_subplot(111)
+                    stats_ax.axis('off')
+                    
+                    # Calculate statistics
+                    cpu_values = [m.cpu_percent for m in self.historical_metrics]
+                    memory_values = [m.memory_percent for m in self.historical_metrics]
+                    disk_values = [m.disk_percent for m in self.historical_metrics]
+                    network_sent = [m.network_sent_rate_mbps for m in self.historical_metrics]
+                    network_recv = [m.network_recv_rate_mbps for m in self.historical_metrics]
+                    
+                    stats_text = f"Resource Monitor - Historical Data Statistics\n"
+                    stats_text += f"{'='*60}\n\n"
+                    stats_text += f"Time Range: {time_range_str}\n"
+                    stats_text += f"Total Records: {len(self.historical_metrics)}\n"
+                    stats_text += f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                    stats_text += f"{'='*60}\n\n"
+                    stats_text += f"CPU Statistics:\n"
+                    stats_text += f"  Average: {sum(cpu_values)/len(cpu_values):.2f}%\n"
+                    stats_text += f"  Minimum: {min(cpu_values):.2f}%\n"
+                    stats_text += f"  Maximum: {max(cpu_values):.2f}%\n\n"
+                    stats_text += f"Memory Statistics:\n"
+                    stats_text += f"  Average: {sum(memory_values)/len(memory_values):.2f}%\n"
+                    stats_text += f"  Minimum: {min(memory_values):.2f}%\n"
+                    stats_text += f"  Maximum: {max(memory_values):.2f}%\n\n"
+                    stats_text += f"Disk Statistics:\n"
+                    stats_text += f"  Average: {sum(disk_values)/len(disk_values):.2f}%\n"
+                    stats_text += f"  Minimum: {min(disk_values):.2f}%\n"
+                    stats_text += f"  Maximum: {max(disk_values):.2f}%\n\n"
+                    stats_text += f"Network Statistics:\n"
+                    stats_text += f"  Sent - Average: {sum(network_sent)/len(network_sent):.2f} Mbps, Max: {max(network_sent):.2f} Mbps\n"
+                    stats_text += f"  Received - Average: {sum(network_recv)/len(network_recv):.2f} Mbps, Max: {max(network_recv):.2f} Mbps\n"
+                    
+                    stats_ax.text(0.1, 0.9, stats_text, transform=stats_ax.transAxes,
+                                 fontsize=10, verticalalignment='top', fontfamily='monospace',
+                                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                    
+                    pdf.savefig(stats_fig, bbox_inches='tight')
+                
+                # Add metadata
+                d = pdf.infodict()
+                d['Title'] = 'Resource Monitor - Historical Graphs'
+                d['Author'] = 'GUI Resource Monitor'
+                d['Subject'] = 'Historical system resource usage graphs'
+                d['Keywords'] = 'CPU, Memory, Disk, Network, Historical Data, Monitoring'
+                d['CreationDate'] = datetime.now()
+            
+            messagebox.showinfo("Success", f"All historical graphs exported successfully to:\n{filename}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export graphs:\n{str(e)}")
     
     def _update_graphs(self, metrics: ResourceMetrics):
         """Update all graphs with new data."""
